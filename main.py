@@ -1,5 +1,7 @@
 import random
-import statistics
+import math
+from dataclasses import dataclass
+from typing import Callable
 
 import matplotlib.pyplot as plt
 
@@ -13,19 +15,43 @@ DIMENSIONS = (10, 30, 100)
 
 SEED = 42
 
-# objective functions
-def one_max(representation: list[int]) -> int:
-    return sum(representation)
+# src: https://benchmarkfcns.info/generated/benchmarkfcns.schwefel.html
+def schwefel(x: list[float]) -> float:
+    return 418.9829 * len(x) - sum(xi * math.sin(math.sqrt(abs(xi))) for xi in x)
 
-def leading_ones(representation: list[int]) -> int:
-    count = 0
-    for bit in representation:
-        if bit != 1:
-            break
-        count += 1
-    return count
+# src: https://benchmarkfcns.info/generated/benchmarkfcns.rastrigin.html
+def rastrigin(x: list[float]) -> float:
+    return 10 * len(x) + sum(xi ** 2 - 10 * math.cos(2 * math.pi * xi) for xi in x)
 
-OBJECTIVES = {"One-max": one_max, "Leading ones": leading_ones}
+# src: https://benchmarkfcns.info/generated/benchmarkfcns.ackley.html
+def ackley(x: list[float]) -> float:
+    d = len(x)
+    s1 = sum(xi ** 2 for xi in x) / d
+    s2 = sum(math.cos(2 * math.pi * xi) for xi in x) / d
+    return -20 * math.exp(-0.2 * math.sqrt(s1)) - math.exp(s2) + 20 + math.e
+
+@dataclass(frozen=True)
+class TestFunction:
+    name: str
+    function: Callable[[list[float]], float]
+    lower: float
+    upper: float
+    optimum_value: float = 0.0
+
+    def __call__(self, x: list[float]) -> float:
+        return self.function(x)
+
+    def clip(self, x: list[float]) -> list[float]:
+        return [min(max(xi, self.lower), self.upper) for xi in x]
+
+    def as_fitness(self) -> Callable[[list[float]], float]:
+        return lambda x: -self.function(x)
+
+SCHWEFEL = TestFunction("Schwefel", schwefel, -500.0, 500.0)
+RASTRIGIN = TestFunction("Rastrigin", rastrigin, -5.12, 5.12)
+ACKLEY = TestFunction("Ackley", ackley, -32.768, 32.768)
+
+TEST_FUNCTIONS = {f.name: f for f in (SCHWEFEL, RASTRIGIN, ACKLEY)}
 
 class BinCandidate:
     def __init__(self, dimension=10, representation: list[int] | None = None) -> None:
@@ -35,7 +61,7 @@ class BinCandidate:
         self.representation = representation
         self.fitness = 0
 
-    def determine_fitness(self, objective=one_max):
+    def determine_fitness(self, objective):
         self.fitness = objective(self.representation)
         return self.fitness
 
@@ -93,6 +119,12 @@ class BinPopulation:
                 break
             second = select()
         return first, second
+
+class ConCandidate:
+    pass
+
+class ConPopulation:
+    pass
 
 def main():
     pass
