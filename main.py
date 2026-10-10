@@ -1,8 +1,9 @@
-import random
-import struct
 import math
-from dataclasses import dataclass
-from typing import Callable
+import random
+import statistics
+import struct
+from dataclasses import dataclass, replace
+from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 
@@ -12,8 +13,8 @@ MUTATION_PROBABILITY = 0.0075
 POPULATION_SIZE = 50
 ELITISM_RATIO = 0.1
 SELECTION = "roulette" # "rank", "roulette"
-EVALS_PER_DIM = 100
-DIMENSIONS = (10, 30, 100)
+EVALUATIONS = 10000
+DIMENSIONS = (10, )
 
 # continuous configuration
 SIGMA = 3
@@ -103,7 +104,7 @@ class BinPopulation:
         return self.sorted_candidates()[:count]
 
     @staticmethod
-    def _spin(candidates: list[BinCandidate], weights: list[int]) -> BinCandidate:
+    def _spin(candidates: list[BinCandidate], weights: list[float]) -> BinCandidate:
         pick = random.uniform(0., sum(weights))
         cumulative = 0.
         for candidate, weight in zip(candidates, weights):
@@ -113,12 +114,13 @@ class BinPopulation:
         return candidates[-1]
 
     def roulette(self) -> BinCandidate:
-        weights = [c.fitness + 1 for c in self.candidates]
+        worst_fitness = self.worst().fitness
+        weights = [c.fitness - worst_fitness + EPSILON for c in self.candidates]
         return self._spin(self.candidates, weights)
 
     def rank(self) -> BinCandidate:
         ordered = sorted(self.candidates, key=lambda c: c.fitness)
-        weights = list(range(1, len(ordered) + 1))
+        weights = [float(i) for i in range(1, len(ordered) + 1)]
         return self._spin(ordered, weights)
 
     def select_parents(self, method: str = SELECTION) -> tuple[BinCandidate, BinCandidate]:
@@ -131,16 +133,28 @@ class BinPopulation:
             second = select()
         return first, second
 
+    @classmethod
+    def from_variant(cls, variant: Variant, function: TestFunction, dim: int, size: int) -> "BinPopulation":
+        return cls([BinCandidate(dim * BITS_PER_DIM) for _ in range(size)])
+
+    @staticmethod
+    def objective(variant: Variant, function: TestFunction) -> Callable[[list[int]], float]:
+        codec = CODECS[variant.representation](function, variant.boundary)
+        return lambda bits: -function(codec.decode(bits))
+
 class ConCandidate:
-    def __init__(self, min: float, max: float, dimensions=10, representation: list[float] | None = None, mutation="gaussian") -> None:
+    def __init__(self, min: float, max: float, dimensions=10, representation: list[float] | None = None, mutation="gaussian", sigma: float = SIGMA, boundary: str = BOUNDARY) -> None:
         self.d = dimensions
         self.min = min
         self.max = max
-        if representation is None: # if not specified the bits are random
+
+        if representation is None: # if not specified the values are random
             representation = [random.uniform(min, max) for _ in range(dimensions)]
         self.representation = representation
         self.mutation = mutation
         self.fitness = 0
+        self.sigma = sigma
+        self.boundary = boundary
 
     def determine_fitness(self, objective):
         self.fitness = objective(self.representation)
@@ -148,16 +162,17 @@ class ConCandidate:
 
     def crossover(self, other: ConCandidate, crossoverPoint: int) -> ConCandidate:
         child = self.representation[:crossoverPoint] + other.representation[crossoverPoint:]
-        return ConCandidate(self.min, self.max, self.d, child)
+        return ConCandidate(self.min, self.max, self.d, child, self.mutation, self.sigma, self.boundary)
 
-    def mutate(self, sigma: float=SIGMA, probability=MUTATION_PROBABILITY):
+    def mutate(self, sigma: float=SIGMA, probability: float=MUTATION_PROBABILITY):
         if random.random() < probability:
             dim_to_mutate = random.randrange(self.d)
             if self.mutation == "gaussian":
-                original_value = self.representation[dim_to_mutate]
-                self.representation[dim_to_mutate] = random.gauss(original_value, sigma)
+                value = random.gauss(self.representation[dim_to_mutate], self.sigma)
             else:
-                self.representation[dim_to_mutate] = random.uniform(self.min, self.max)
+                value = random.uniform(self.min, self.max)
+            
+            self.representation[dim_to_mutate] = repair(value, self.min, self.max, self.boundary)
 
 class ConPopulation:
     def __init__(self, candidates: list[ConCandidate], generation: int = 0) -> None:
@@ -193,9 +208,8 @@ class ConPopulation:
 
     def rank(self) -> ConCandidate:
         ordered = sorted(self.candidates, key=lambda c: c.fitness)
-        weights = list(range(1, len(ordered) + 1))
-        weights_float = list(float(i) for i in weights)
-        return self._spin(ordered, weights_float)
+        weights = [float(i) for i in range(1, len(ordered) + 1)]
+        return self._spin(ordered, weights)
 
     def select_parents(self, method: str = SELECTION) -> tuple[ConCandidate, ConCandidate]:
         select = self.roulette if method == "roulette" else self.rank
@@ -207,6 +221,23 @@ class ConPopulation:
             second = select()
         return first, second
 
+    @classmethod
+    def from_variant(cls, variant: Variant, function: TestFunction, dim: int, size: int) -> "ConPopulation":
+        sigma = variant.sigma_ratio * (function.upper - function.lower)
+        return cls([ConCandidate(function.lower, function.upper, dim, mutation=variant.mutation,
+                                 sigma=sigma, boundary=variant.boundary)
+                    for _ in range(size)])
+
+    @staticmethod
+    def objective(variant: Variant, function: TestFunction) -> Callable[[list[float]], float]:
+        return function.as_fitness()
+
+def bits_to_int(bits: list[int]) -> int:
+    number = 0
+    for bit in bits:
+        number = (number << 1) | bit
+    return number
+ 
 def repair(value: float, lower: float, upper: float, strategy: str = BOUNDARY) -> float:
     if math.isnan(value):
         return lower
@@ -221,15 +252,8 @@ def repair(value: float, lower: float, upper: float, strategy: str = BOUNDARY) -
         t = (value - lower) % (2 * width)
         return lower + (t if t <= width else 2 * width - t)
     raise ValueError(f"Unknown boundary strategy: {strategy}")
- 
- 
-def bits_to_int(bits: list[int]) -> int:
-    number = 0
-    for bit in bits:
-        number = (number << 1) | bit
-    return number
- 
- 
+
+
 class Codec:
     def __init__(self, function: TestFunction, boundary: str = BOUNDARY) -> None:
         self.function = function
@@ -242,7 +266,6 @@ class Codec:
         genes = (bits[i:i + BITS_PER_DIM] for i in range(0, len(bits), BITS_PER_DIM))
         return [repair(self.raw(g), self.function.lower, self.function.upper, self.boundary)
                 for g in genes]
- 
  
 class IEEE754Codec(Codec):
     def raw(self, gene: list[int]) -> float:
@@ -276,15 +299,15 @@ class BCDCodec(Codec):
  
  
 CODECS = {"ieee754": IEEE754Codec, "fixed": FixedPointCodec, "bcd": BCDCodec}
-
-
+ 
 @dataclass(frozen=True)
 class Variant:
     name: str
-    representation: str  # "ieee754", "fixed", "bcd", "real"
+    representation: str
     mutation_probability: float
-    mutation: str = "gaussian" # "gaussian", "uniform"
-    # TODO
+    mutation: str = "gaussian"
+    sigma_ratio: float = 0.05
+    boundary: str = BOUNDARY
 
 VARIANTS = [
     Variant("IEEE 754", "ieee754", MUTATION_PROBABILITY),
@@ -293,16 +316,133 @@ VARIANTS = [
     Variant("Real + Gaussian", "real", MUTATION_PROBABILITY, "gaussian"),
     Variant("Real + uniform", "real", MUTATION_PROBABILITY, "uniform"),
 ]
- 
- 
-def run_ga():
-    # TODO
-    pass
+
+BIN_PROBABILITIES = (0.001, 0.0075, 0.02)
+REAL_PROBABILITIES = (0.05, 0.2, 0.5, 1.0)
+SIGMA_RATIOS = (0.01, 0.05, 0.1, 0.25)
+SELECTIONS = ("roulette", "rank")
+
+
+def elite_count() -> int:
+    return max(1, round(ELITISM_RATIO * POPULATION_SIZE))
+
+
+def build_population(variant: Variant, function: TestFunction, dim: int) -> tuple[Any, Callable[[Any], float]]:
+    if variant.representation == "real":
+        candidates = [ConCandidate(function.lower, function.upper, dim, mutation=variant.mutation)
+                      for _ in range(POPULATION_SIZE)]
+        return ConPopulation(candidates), function.as_fitness()
+    codec = CODECS[variant.representation](function, variant.boundary)
+    candidates = [BinCandidate(dim * BITS_PER_DIM) for _ in range(POPULATION_SIZE)]
+    return BinPopulation(candidates), lambda bits: -function(codec.decode(bits))
+
+def run_ga(variant: Variant, function: TestFunction, dim: int,
+           selection: str = SELECTION, seed: int = SEED) -> list[float]:
+    random.seed(seed)
+    population_cls: Any = ConPopulation if variant.representation == "real" else BinPopulation
+    population = population_cls.from_variant(variant, function, dim, POPULATION_SIZE)
+    objective = population_cls.objective(variant, function)
+    for candidate in population.candidates:
+        candidate.determine_fitness(objective)
+
+    n_elite = elite_count()
+    offspring = POPULATION_SIZE - n_elite
+    generations = max(1, (EVALUATIONS - POPULATION_SIZE) // offspring)
+    history = [-population.best().fitness]
+
+    for _ in range(generations):
+        children = population.elite(n_elite)
+        while len(children) < POPULATION_SIZE:
+            p1, p2 = population.select_parents(selection)
+            point = random.randint(1, len(p1.representation) - 1)
+            child = p1.crossover(p2, point)
+            child.mutate(variant.mutation_probability)
+            child.determine_fitness(objective)
+            children.append(child)
+        population = population_cls(children, population.generation + 1)
+        history.append(-population.best().fitness)
+    return history
+
+
+def run_experiment(function: TestFunction, dim: int, variants=VARIANTS,
+                   selection: str = SELECTION) -> dict[str, list[list[float]]]:
+    return {v.name: [run_ga(v, function, dim, selection, SEED + r) for r in range(RUNS_NO)]
+            for v in variants}
+
+
+def mean_std(histories: list[list[float]]) -> tuple[list[float], list[float]]:
+    columns = list(zip(*histories))
+    return ([statistics.mean(c) for c in columns],
+            [statistics.stdev(c) for c in columns])
+
+
+def plot_convergence(results: dict, path: str = "convergence.png") -> None:
+    offspring = POPULATION_SIZE - elite_count()
+    fig, axes = plt.subplots(len(TEST_FUNCTIONS), len(DIMENSIONS),
+                             figsize=(12, 10), squeeze=False)
+    for row, fname in enumerate(TEST_FUNCTIONS):
+        for col, dim in enumerate(DIMENSIONS):
+            ax = axes[row][col]
+            for name, histories in results[(fname, dim)].items():
+                mean, std = mean_std(histories)
+                x = [POPULATION_SIZE + g * offspring for g in range(len(mean))]
+                ax.plot(x, [max(m, 1e-12) for m in mean], label=name)
+                ax.fill_between(x, [max(m - s, 1e-12) for m, s in zip(mean, std)],
+                                [max(m + s, 1e-12) for m, s in zip(mean, std)], alpha=0.12)
+            ax.set_yscale("log")
+            ax.set_title(f"{fname}, d={dim}")
+            ax.set_xlabel("evaluations")
+            ax.set_ylabel("best f(x), mean +/- std")
+            ax.grid(alpha=0.3)
+    axes[0][0].legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+
+
+def print_summary(results: dict) -> None:
+    for (fname, dim), by_variant in results.items():
+        print(f"\n{fname}, d={dim}")
+        for name, histories in by_variant.items():
+            finals = [h[-1] for h in histories]
+            print(f"  {name:<18} mean {statistics.mean(finals):12.4f}  "
+                  f"std {statistics.stdev(finals):10.4f}  best {min(finals):12.4f}")
+
+
+def candidate_variants(base: Variant) -> list[Variant]:
+    if base.representation != "real":
+        return [replace(base, mutation_probability=p) for p in BIN_PROBABILITIES]
+    sigmas = SIGMA_RATIOS if base.mutation == "gaussian" else (base.sigma_ratio,)
+    return [replace(base, mutation_probability=p, sigma_ratio=s)
+            for p in REAL_PROBABILITIES for s in sigmas]
+
+
+def tune(function: TestFunction, dim: int = DIMENSIONS[0]) -> dict:
+    best = {}
+    for base in VARIANTS:
+        scored = []
+        for variant in candidate_variants(base):
+            for selection in SELECTIONS:
+                finals = [run_ga(variant, function, dim, selection, SEED + r)[-1]
+                          for r in range(RUNS_NO)]
+                scored.append((statistics.mean(finals), variant, selection))
+        best[base.name] = min(scored, key=lambda s: s[0])
+    return best
+
 
 def main():
-    candidate = ConCandidate(-50, 50);
-    print(candidate.representation)
-    pass
+    results = {}
+    for function in TEST_FUNCTIONS.values():
+        for dim in DIMENSIONS:
+            results[(function.name, dim)] = run_experiment(function, dim)
+    print_summary(results)
+    plot_convergence(results)
+
+    for function in TEST_FUNCTIONS.values():
+        print(f"\nBest parameters: {function.name}, d={DIMENSIONS[0]}")
+        for name, (score, variant, selection) in tune(function).items():
+            print(f"\t{name:<18} {score:12.4f}  p={variant.mutation_probability}  "
+                  f"sigma_ratio={variant.sigma_ratio}  selection={selection}")
+    plt.show()
 
 if __name__ == "__main__":
     main()
