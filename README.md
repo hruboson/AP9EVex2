@@ -6,6 +6,23 @@ Author: [Ondřej Hruboš](https://github.com/hruboson), [Github repository](http
 
 This implementation builds on the algorithm and object-oriented implementation of the first assignment, while adding new classes representing the continuous implementation.
 
+**Test functions** (minimisation, 10D, in `TestFunction` objects so any algorithm can be substituted): Schwefel ([-500, 500]), Rastrigin ([-5.12, 5.12]) and Ackley ([-32.768, 32.768]).
+
+**Binary representations** (32 bits per dimension, decoded by a `Codec`):
+- **IEEE 754:** the 32 bits are interpreted as a float32.
+- **Fixed-point:** `ceil(log2(range + 1))` bits for the integer part, the rest for the fraction, offset to the lower bound.
+- **BCD:** 8 decimal digits of 4 bits each, offset to the lower bound. Groups above 9 are clamped to 9.
+
+All codecs repair values outside the allowed interval with a boundary strategy (`clip`, `wrap` or `reflect`, switched by `BOUNDARY` constant). NaN and infinity are mapped to the bounds. The results below use `clip`.
+
+**Real-valued GA:** one-point crossover on the level of whole dimensions, and one of two mutations that change one random dimension with probability `p`:
+- **Gaussian:** a new value drawn from N(old value, sigma), with sigma = `sigma_ratio * range`.
+- **Uniform:** a new value drawn uniformly from the allowed range.
+
+Mutated values are repaired with the same boundary strategy.
+
+**GA setup:** population 50, 10 % elitism, roulette (shifted by the worst fitness, because the fitness is `-f(x)`) or rank selection, one-point crossover, 10 000 evaluations per run, 10 runs per variant (seeds `SEED + run`). `tune()` runs a grid search over mutation probability, sigma ratio and selection at d=10.
+
 # Experiments
 
 The algorithm runs 10 000 times for each test functions and problem in 10 dimensions.
@@ -17,9 +34,26 @@ At the end I try to find the best hyperparameter settings by running the algorit
 
 # Results
 
-Convergence graph:
+Convergence graph (means of 10 runs, **logarithmic scale**):
 
 ![Convergence graph](convergence.png)
+
+Final best f(x) after 10 000 evaluations, 10D. Values are the tuned results (best of the hyperparameter grid, mean of 10 runs). The full output with default parameters is in [`out.txt`](./out.txt).
+
+| Method | Schwefel | Rastrigin | Ackley | Best parameters |
+|---|---:|---:|---:|---|
+| IEEE 754 | 1855.13 | 0.00 | 0.00 | p=0.001, roulette (Schwefel: p=0.02) |
+| Fixed-point | 223.95 | 4.41 | 2.17 | p=0.02, rank (Ackley: p=0.0075) |
+| BCD | 341.45 | 33.96 | 7.68 | p=0.02, rank (Schwefel: p=0.0075) |
+| Real + Gaussian | 594.42 | 18.99 | 7.10 | p=0.05, sigma_ratio=0.01, rank |
+| Real + uniform | 610.64 | 27.31 | 10.46 | p=0.05, rank or roulette |
+
+
+- **IEEE 754:** good for Rastrigin and Ackley, but the worst on Schwefel. Float32 is densest around 0, which is where the functions have their optimum.
+- **Fixed-point:** the most consistent method and the best for Schwefel.
+- **BCD:** good only for Schwefel. 
+- **Real + Gaussian:** better than uniform on all three functions. Small sigma was better for most cases and a low mutation probability, but it was still worse than fixed-point, probably because it mutates at most one gene per child.
+- **Real + uniform:** the weakest on Ackley and Rastrigin among the unbiased methods.
 
 #### Output shown as table
 
